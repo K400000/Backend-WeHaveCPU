@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import {
     getProfile, updateProfile, changePassword,
-    adminGetUsers, adminChangeUserStatus, adminPromoteUser, adminDemoteUser
+    adminGetUsers, adminChangeUserStatus, adminPromoteUser, adminDemoteUser,
+    adminSetUserRoleByEmail
 } from '../controllers/userController.js';
 import { authenticate } from '../middlewares/authMiddleware.js';
 import { requireAdmin } from '../middlewares/roleMiddleware.js';
@@ -137,6 +138,44 @@ router.patch('/admin/:userId/promote', requireAdmin, adminPromoteUser);
  *         description: User not found
  */
 router.patch('/admin/:userId/demote', requireAdmin, adminDemoteUser);
+
+/**
+ * @swagger
+ * /api/users/admin/set-role:
+ *   patch:
+ *     summary: Set user role (member or admin) by email (Admin)
+ *     description: |
+ *       กำหนด role ของผู้ใช้โดยใช้ email แทน userId ในครั้งเดียว.<br>
+ *       **ข้อจำกัด:** ไม่สามารถเปลี่ยน role ของตนเองได้, user ต้องมี status = active เพื่อ promote เป็น admin.<br>
+ *       **หมายเหตุ:** การเปลี่ยน role จะมีผลทันที ไม่มีการตรวจสอบว่ามีบิลหรือตะกร้าค้างอยู่.
+ *     tags: [Users (Admin)]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, role]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 example: user@example.com
+ *               role:
+ *                 type: string
+ *                 enum: [member, admin]
+ *                 example: admin
+ *     responses:
+ *       200:
+ *         description: Role updated successfully
+ *       400:
+ *         description: Invalid input, own account, role unchanged, or user is not active (for promote)
+ *       403:
+ *         description: Admin access required
+ *       404:
+ *         description: User with given email not found
+ */
+router.patch('/admin/set-role', requireAdmin, adminSetUserRoleByEmail);
 
 /**
  * @swagger

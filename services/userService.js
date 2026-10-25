@@ -202,3 +202,59 @@ export const adminChangeUserRole = async (targetId, adminId, newRole) => {
         client.release();
     }
 };
+
+/**
+ * [Admin] Set role by email (member or admin) — cannot target yourself
+ */
+export const adminSetRoleByEmail = async (email, adminId, newRole) => {
+    if (!USER_ROLES.includes(newRole)) {
+        throw { status: 400, message: `Role must be one of: ${USER_ROLES.join(', ')}` };
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const { rows } = await client.query(
+            'SELECT "userId", "email", "role", "status" FROM "users" WHERE LOWER("email") = $1 FOR UPDATE;',
+            [email]
+        );
+        const target = rows[0];
+
+        if (!target) {
+            throw { status: 404, message: `User with email "${email}" not found` };
+        }
+
+        if (target.userId === adminId) {
+            throw { status: 400, message: 'You cannot change your own role' };
+        }
+
+        if (target.role === newRole) {
+            throw { status: 400, message: `User is already "${newRole}"` };
+        }
+
+        if (newRole === 'admin' && target.status !== 'active') {
+            throw { status: 400, message: 'Only active users can be promoted to admin' };
+        }
+
+        const updated = await client.query(
+            `
+            UPDATE "users"
+            SET "role" = $1,
+                "promotedBy" = CASE WHEN $1 = 'admin' THEN $2::int ELSE NULL END,
+                "updatedAt" = NOW()
+            WHERE "userId" = $3
+            RETURNING "userId", "email", "firstName", "lastName", "role", "status", "promotedBy", "updatedAt";
+            `,
+            [newRole, adminId, target.userId]
+        );
+
+        await client.query('COMMIT');
+        return updated.rows[0];
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+};

@@ -233,3 +233,26 @@ export async function adminDemoteUser(req, res) {
         return res.status(err.status || 500).json({ message: err.message });
     }
 }
+// 8. [Admin] กำหนดสิทธิ์ (role) ของผู้ใช้ด้วย email
+export async function adminSetUserRoleByEmail(req, res) {
+    try {
+        const { email, role } = req.body;
+
+        if (!email || !role) {
+            return res.status(400).json({ message: 'email and role are required' });
+        }
+
+        if (!['member', 'admin'].includes(role)) {
+            return res.status(400).json({ message: 'role must be either "member" or "admin"' });
+        }
+
+        const user = await userService.adminSetRoleByEmail(email.trim().toLowerCase(), req.user.userId, role);
+
+        return res.status(200).json({
+            message: `User role updated to "${role}" successfully`,
+            user
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}

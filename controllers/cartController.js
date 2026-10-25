@@ -66,15 +66,20 @@ export async function getCart(req, res) {
 
 // 2. เพิ่มสินค้าลงในตะกร้า
 export async function addToCart(req, res) {
+    // 1. ดึง Client จาก Pool เพื่อทำ Transaction
+    const client = await database.connect();
+
     try {
         const userId = req.user?.userId;
         const { productId, quantity = 1 } = req.body;
 
-        if (!productId || Number(quantity) <= 0) {
-            return res.status(400).json({ message: 'Valid productId and quantity are required' });
+        const qty = parseInt(quantity, 10);
+        if (!productId || isNaN(qty) || qty <= 0) {
+            return res.status(400).json({ message: 'Valid productId and positive quantity are required' });
         }
 
-        const qty = parseInt(quantity, 10);
+        // เริ่ม Transaction
+        await client.query('BEGIN');
 
         // ตรวจสอบสินค้าและ Stock
         const productQry = `
@@ -83,25 +88,27 @@ export async function addToCart(req, res) {
             WHERE "productId" = $1
             LIMIT 1;
         `;
-        const productRes = await database.query(productQry, [productId]);
+        const productRes = await client.query(productQry, [productId]);
         const product = productRes.rows[0];
 
         if (!product || product.deletedAt || !product.isActive) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Product not found or unavailable' });
         }
 
         if (product.stock < qty) {
+            await client.query('ROLLBACK');
             return res.status(400).json({ message: 'Insufficient stock available' });
         }
 
-        // ตรวจสอบหรือสร้าง Order สถานะ 'cart'
+        // ตรวจสอบหรือสร้าง Order สถานะ 'cart' (ใส่ FOR UPDATE กัน Race Condition)
         let orderId;
         const findCartQry = `
             SELECT "orderId" FROM "orders"
             WHERE "userId" = $1 AND "status" = 'cart'
-            LIMIT 1;
+            FOR UPDATE LIMIT 1;
         `;
-        const cartRes = await database.query(findCartQry, [userId]);
+        const cartRes = await client.query(findCartQry, [userId]);
 
         if (cartRes.rows.length > 0) {
             orderId = cartRes.rows[0].orderId;
@@ -111,7 +118,7 @@ export async function addToCart(req, res) {
                 VALUES ($1, 'cart', 0, 0)
                 RETURNING "orderId";
             `;
-            const newCartRes = await database.query(createCartQry, [userId]);
+            const newCartRes = await client.query(createCartQry, [userId]);
             orderId = newCartRes.rows[0].orderId;
         }
 
@@ -121,38 +128,41 @@ export async function addToCart(req, res) {
             FROM "orderItems"
             WHERE "orderId" = $1 AND "productId" = $2;
         `;
-        const itemRes = await database.query(checkItemQry, [orderId, productId]);
+        const itemRes = await client.query(checkItemQry, [orderId, productId]);
 
         if (itemRes.rows.length > 0) {
             const existingItem = itemRes.rows[0];
             const newQty = existingItem.quantity + qty;
 
             if (newQty > product.stock) {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ message: `Cannot add more. Max stock available is ${product.stock}` });
             }
 
             const updateItemQry = `
                 UPDATE "orderItems"
                 SET "quantity" = $1, "subtotal" = $1 * "unitPrice"
-                WHERE "orderItemId" = $2
-                RETURNING *;
+                WHERE "orderItemId" = $2;
             `;
-            await database.query(updateItemQry, [newQty, existingItem.orderItemId]);
+            await client.query(updateItemQry, [newQty, existingItem.orderItemId]);
         } else {
+            // คำนวณ subtotal จาก JS ฝั่งนี้ เพื่อแก้ปัญหา operator is not unique: unknown * unknown
+            const unitPrice = Number(product.price);
+            const subtotal = unitPrice * qty;
+
             const insertItemQry = `
                 INSERT INTO "orderItems" (
                     "orderId", "productId", "productSku", "productName", 
                     "unitPrice", "quantity", "subtotal"
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $5 * $6)
-                RETURNING *;
+                VALUES ($1, $2, $3, $4, $5, $6, DEFAULT);
             `;
-            await database.query(insertItemQry, [
+            await client.query(insertItemQry, [
                 orderId,
                 product.productId,
                 product.sku,
                 product.name,
-                product.price,
+                unitPrice,
                 qty
             ]);
         }
@@ -165,58 +175,81 @@ export async function addToCart(req, res) {
                 "updatedAt" = NOW()
             WHERE "orderId" = $1;
         `;
-        await database.query(updateTotalsQry, [orderId]);
+        await client.query(updateTotalsQry, [orderId]);
 
+        // บันทึกการทำงานทั้งหมด
+        await client.query('COMMIT');
         return res.status(200).json({ message: 'Product added to cart successfully' });
+
     } catch (err) {
+        // หากเกิด Error ให้ย้อนกลับข้อมูลทั้งหมด
+        await client.query('ROLLBACK');
         return res.status(500).json({ message: err.message });
+    } finally {
+        // คืน Connection กลับสู่ Pool เสมอ
+        client.release();
     }
 }
 
 // 3. แก้ไขจำนวนสินค้าในตะกร้า
 export async function updateCartItem(req, res) {
+    const client = await database.connect();
+
     try {
         const userId = req.user?.userId;
         const { itemId } = req.params;
         const { quantity } = req.body;
 
+        const orderItemId = parseInt(itemId, 10);
         const qty = parseInt(quantity, 10);
-        if (isNaN(qty) || qty < 0) {
-            return res.status(400).json({ message: 'Valid quantity is required' });
+
+        if (isNaN(orderItemId) || isNaN(qty) || qty < 0) {
+            return res.status(400).json({ message: 'Valid orderItemId and quantity (>= 0) are required' });
         }
 
-        // ดึงข้อมูลรายการสินค้าและตรวจสอบว่าเป็นของ User คนนี้จริง
+        await client.query('BEGIN');
+
+        // 1. ดึงข้อมูลรายการสินค้า พร้อม Lock Row ป้องกัน Race Condition
         const itemQry = `
             SELECT oi."orderItemId", oi."orderId", oi."productId", oi."unitPrice", p."stock"
             FROM "orderItems" oi
             JOIN "orders" o ON oi."orderId" = o."orderId"
             JOIN "products" p ON oi."productId" = p."productId"
-            WHERE oi."orderItemId" = $1 AND o."userId" = $2 AND o."status" = 'cart';
+            WHERE oi."orderItemId" = $1 AND o."userId" = $2 AND o."status" = 'cart'
+            FOR UPDATE OF oi;
         `;
-        const itemRes = await database.query(itemQry, [itemId, userId]);
+        const itemRes = await client.query(itemQry, [orderItemId, userId]);
         const item = itemRes.rows[0];
 
         if (!item) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Cart item not found' });
         }
 
-        // ถ้าจำนวนเป็น 0 ให้ลบออกจากตะกร้า
+        // 2. ถ้า quantity เป็น 0 ให้ลบออกจากตะกร้า
         if (qty === 0) {
-            await database.query(`DELETE FROM "orderItems" WHERE "orderItemId" = $1;`, [itemId]);
+            const deleteQry = `
+                DELETE FROM "orderItems" 
+                WHERE "orderItemId" = $1;
+            `;
+            await client.query(deleteQry, [orderItemId]);
         } else {
+            // เช็กสต็อกสินค้า
             if (qty > item.stock) {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ message: `Requested quantity exceeds available stock (${item.stock})` });
             }
 
+            // ตัด "subtotal" ออก ให้ Postgres Generated Column คำนวณเองอัตโนมัติ
             const updateQry = `
                 UPDATE "orderItems"
-                SET "quantity" = $1, "subtotal" = $1 * "unitPrice"
+                SET "quantity" = $1
                 WHERE "orderItemId" = $2;
             `;
-            await database.query(updateQry, [qty, itemId]);
+            await client.query(updateQry, [qty, orderItemId]);
         }
 
-        // อัปเดตยอดรวมใน orders
+        // 3. อัปเดตยอดรวมใน orders
         const updateTotalsQry = `
             UPDATE "orders"
             SET "totalQty" = COALESCE((SELECT SUM("quantity") FROM "orderItems" WHERE "orderId" = $1), 0),
@@ -224,11 +257,18 @@ export async function updateCartItem(req, res) {
                 "updatedAt" = NOW()
             WHERE "orderId" = $1;
         `;
-        await database.query(updateTotalsQry, [item.orderId]);
+        await client.query(updateTotalsQry, [item.orderId]);
 
-        return res.status(200).json({ message: 'Cart item updated successfully' });
+        await client.query('COMMIT');
+        return res.status(200).json({
+            message: qty === 0 ? 'Item removed from cart' : 'Cart item updated successfully'
+        });
+
     } catch (err) {
+        await client.query('ROLLBACK');
         return res.status(500).json({ message: err.message });
+    } finally {
+        client.release();
     }
 }
 
