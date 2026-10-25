@@ -1,11 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import YAML from 'yaml';
 import swaggerUi from 'swagger-ui-express';
 
-import swaggerSpec from './config/swagger.js';
 import apiRoutes from './routes/index.js';
 import errorHandler from './middlewares/errorHandler.js';
 
@@ -34,7 +35,16 @@ app.use(cookieParser());
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
 // 3. API Documentation (Swagger UI)
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+const swaggerFile = fs.readFileSync(path.join(__dirname, 'swagger.yaml'), 'utf8');
+const swaggerDocument = YAML.parse(swaggerFile);
+
+const host = process.env.HOST || 'localhost';
+const port = process.env.PORT || 3000;
+swaggerDocument.servers = [
+    { url: `http://${host}:${port}`, description: `Server (${host}:${port})` }
+];
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // 4. Root Welcome Endpoint
 app.get('/', (req, res) => {

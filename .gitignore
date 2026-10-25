@@ -9,8 +9,10 @@ yarn-error.log*
 .env.local
 .env.*.local
 
-# API Documentation Directory (บล็อกโฟลเดอร์ docs ตามที่ระบุ)
+# API Documentation Directory & Spec (บล็อกไฟล์ docs และ swagger.yaml)
 /docs/
+swagger.yaml
+*.yaml
 
 # Uploaded Files (บล็อกรูปภาพที่อัปโหลดเข้ามา แต่เว้นไฟล์ .gitkeep ไว้เพื่อรักษาโครงสร้างโฟลเดอร์)
 public/uploads/*
