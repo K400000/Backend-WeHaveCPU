@@ -1,5 +1,6 @@
 import bcrypt from 'bcrypt';
 import database from '../config/db.js';
+import * as userService from '../services/userService.js';
 
 // 1. ดูข้อมูลโปรไฟล์ของตนเอง
 export async function getProfile(req, res) {
@@ -143,5 +144,92 @@ export async function changePassword(req, res) {
         return res.status(200).json({ message: 'Password changed successfully' });
     } catch (err) {
         return res.status(500).json({ message: err.message });
+    }
+}
+
+function parseUserId(value) {
+    return /^\d+$/.test(value) ? parseInt(value, 10) : null;
+}
+
+// 4. [Admin] รายการผู้ใช้ทั้งหมด (กรอง status/role, ค้นหา, แบ่งหน้า)
+export async function adminGetUsers(req, res) {
+    try {
+        const { status, role } = req.query;
+        const search = req.query.search?.trim() || null;
+        const page = parseInt(req.query.page, 10) || 1;
+        const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+
+        if (status && !['active', 'suspended', 'banned'].includes(status)) {
+            return res.status(400).json({ message: 'Status must be one of: active, suspended, banned' });
+        }
+
+        if (role && !['member', 'admin'].includes(role)) {
+            return res.status(400).json({ message: 'Role must be one of: member, admin' });
+        }
+
+        if (page < 1 || limit < 1) {
+            return res.status(400).json({ message: 'page and limit must be positive integers' });
+        }
+
+        const result = await userService.adminListUsers({
+            status: status || null,
+            role: role || null,
+            search,
+            page,
+            limit
+        });
+
+        return res.status(200).json(result);
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+// 5. [Admin] เปลี่ยนสถานะผู้ใช้ (active / suspended / banned)
+export async function adminChangeUserStatus(req, res) {
+    try {
+        const targetId = parseUserId(req.params.userId);
+        if (!targetId) {
+            return res.status(400).json({ message: 'Valid userId is required' });
+        }
+
+        const { status, reason } = req.body;
+        const user = await userService.adminChangeUserStatus(targetId, req.user.userId, status, reason);
+
+        return res.status(200).json({ message: 'User status updated successfully', user });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+// 6. [Admin] เลื่อนขั้น member เป็น admin
+export async function adminPromoteUser(req, res) {
+    try {
+        const targetId = parseUserId(req.params.userId);
+        if (!targetId) {
+            return res.status(400).json({ message: 'Valid userId is required' });
+        }
+
+        const user = await userService.adminChangeUserRole(targetId, req.user.userId, 'admin');
+
+        return res.status(200).json({ message: 'User promoted to admin successfully', user });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+// 7. [Admin] ลดสิทธิ์ admin เป็น member
+export async function adminDemoteUser(req, res) {
+    try {
+        const targetId = parseUserId(req.params.userId);
+        if (!targetId) {
+            return res.status(400).json({ message: 'Valid userId is required' });
+        }
+
+        const user = await userService.adminChangeUserRole(targetId, req.user.userId, 'member');
+
+        return res.status(200).json({ message: 'Admin demoted to member successfully', user });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
     }
 }
