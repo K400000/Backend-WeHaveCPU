@@ -690,11 +690,11 @@ export const advanceShipment = async (orderId, adminId, { status, courier, track
             const updated = await client.query(
                 `
                 UPDATE "shipments"
-                SET "status" = $1,
+                SET "status" = $1::"shipmentStatus",
                     "courier" = $2,
                     "trackingNo" = $3,
-                    "shippedAt" = CASE WHEN $1 = 'shipped' THEN NOW() ELSE "shippedAt" END,
-                    "deliveredAt" = CASE WHEN $1 = 'delivered' THEN NOW() ELSE "deliveredAt" END,
+                    "shippedAt" = CASE WHEN $1::text = 'shipped' THEN NOW() ELSE "shippedAt" END,
+                    "deliveredAt" = CASE WHEN $1::text = 'delivered' THEN NOW() ELSE "deliveredAt" END,
                     "updatedAt" = NOW()
                 WHERE "shipmentId" = $4
                 RETURNING *;
@@ -707,23 +707,24 @@ export const advanceShipment = async (orderId, adminId, { status, courier, track
         await client.query(
             `
             INSERT INTO "shipmentEvents" ("shipmentId", "status", "note", "changedBy", "createdAt")
-            VALUES ($1, $2, $3, $4, NOW());
+            VALUES ($1, $2::"shipmentStatus", $3, $4, NOW());
             `,
             [shipment.shipmentId, nextStatus, note?.trim() || SHIPMENT_NOTES[nextStatus], adminId]
         );
 
+        // shipped -> order shipped, delivered -> order completed
         // shipped -> order shipped, delivered -> order completed
         const orderStatusByShipment = { shipped: 'shipped', delivered: 'completed' };
         const newOrderStatus = orderStatusByShipment[nextStatus];
         let updatedOrder = order;
 
         if (newOrderStatus) {
-            // status <> $1 กันซ้ำ หาก DB trigger เปลี่ยนสถานะบิลให้แล้ว
+            // ใช้ ::"orderStatus" เพื่อให้ตรงกับ ENUM Type ของตาราง orders
             const orderUpdate = await client.query(
                 `
                 UPDATE "orders"
-                SET "status" = $1, "updatedAt" = NOW()
-                WHERE "orderId" = $2 AND "status" <> $1
+                SET "status" = $1::"orderStatus", "updatedAt" = NOW()
+                WHERE "orderId" = $2 AND "status"::text <> $1::text
                 RETURNING *;
                 `,
                 [newOrderStatus, orderId]
