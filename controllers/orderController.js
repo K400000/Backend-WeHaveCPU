@@ -357,6 +357,120 @@ export async function cancelMyOrder(req, res) {
     }
 }
 
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseOrderId(value) {
+    return /^\d+$/.test(value) ? parseInt(value, 10) : null;
+}
+
+/**
+ * [Admin] รายการคำสั่งซื้อทั้งหมด (ไม่รวม 'cart') + กรองช่วงวันที่ + แบ่งหน้า
+ */
+export async function adminGetOrders(req, res) {
+    try {
+        const { dateFrom, dateTo } = req.query;
+        const page = parseInt(req.query.page, 10) || 1;
+        const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+
+        if ((dateFrom && !DATE_REGEX.test(dateFrom)) || (dateTo && !DATE_REGEX.test(dateTo))) {
+            return res.status(400).json({ message: 'dateFrom and dateTo must be in YYYY-MM-DD format' });
+        }
+
+        if (dateFrom && dateTo && dateFrom > dateTo) {
+            return res.status(400).json({ message: 'dateFrom cannot be after dateTo' });
+        }
+
+        if (page < 1 || limit < 1) {
+            return res.status(400).json({ message: 'page and limit must be positive integers' });
+        }
+
+        const result = await orderService.adminListOrders({
+            dateFrom: dateFrom || null,
+            dateTo: dateTo || null,
+            page,
+            limit
+        });
+
+        return res.status(200).json(result);
+    } catch (err) {
+        // วันที่ที่ format ถูกแต่ไม่มีจริง (เช่น 2026-02-31) -> PG error 22008
+        if (err.code === '22008') {
+            return res.status(400).json({ message: 'Invalid date' });
+        }
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+/**
+ * [Admin] รายละเอียดคำสั่งซื้อ (ลูกค้า, สินค้า, พัสดุ+ไทม์ไลน์, ประวัติสถานะ)
+ */
+export async function adminGetOrderById(req, res) {
+    try {
+        const orderId = parseOrderId(req.params.orderId);
+        if (!orderId) {
+            return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        const order = await orderService.adminGetOrderDetail(orderId);
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        return res.status(200).json(order);
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+/**
+ * [Admin] ยกเลิกบิลที่ยังไม่จ่าย (pending) + คืน stock, cancelReason = 'admin'
+ */
+export async function adminCancelOrder(req, res) {
+    try {
+        const orderId = parseOrderId(req.params.orderId);
+        if (!orderId) {
+            return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        const cancelledOrder = await orderService.cancelOrder(orderId, req.user.userId, 'admin', true);
+
+        return res.status(200).json({
+            message: 'Order cancelled successfully and stock refunded.',
+            order: cancelledOrder
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
+/**
+ * [Admin] เลื่อนสถานะพัสดุทีละขั้น (กรอกขนส่ง + เลขพัสดุตอน shipped)
+ */
+export async function adminAdvanceShipment(req, res) {
+    try {
+        const orderId = parseOrderId(req.params.orderId);
+        if (!orderId) {
+            return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        const { status, courier, trackingNo, note } = req.body;
+
+        const result = await orderService.advanceShipment(orderId, req.user.userId, {
+            status,
+            courier,
+            trackingNo,
+            note
+        });
+
+        return res.status(200).json({
+            message: `Shipment advanced to "${result.shipment.status}"`,
+            ...result
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ message: err.message });
+    }
+}
+
 /**
  * Update order status (Admin)
  */
