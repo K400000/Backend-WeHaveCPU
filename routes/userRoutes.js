@@ -1,12 +1,142 @@
 import { Router } from 'express';
-import { getProfile, updateProfile, changePassword } from '../controllers/userController.js';
+import {
+    getProfile, updateProfile, changePassword,
+    adminGetUsers, adminChangeUserStatus, adminPromoteUser, adminDemoteUser
+} from '../controllers/userController.js';
 import { authenticate } from '../middlewares/authMiddleware.js';
+import { requireAdmin } from '../middlewares/roleMiddleware.js';
 import { uploadProfileImage } from '../middlewares/uploadMiddleware.js';
 
 const router = Router();
 
 // ทุก Route ในนี้ต้องผ่านการตรวจสอบสถานะการ Login
 router.use(authenticate);
+
+/**
+ * @swagger
+ * /api/users/admin:
+ *   get:
+ *     summary: List users with filters, search and pagination (Admin)
+ *     tags: [Users (Admin)]
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [active, suspended, banned]
+ *       - in: query
+ *         name: role
+ *         schema:
+ *           type: string
+ *           enum: [member, admin]
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Matches email or full name (case-insensitive)
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *     responses:
+ *       200:
+ *         description: Users with pagination { page, limit, total, totalPages }
+ *       400:
+ *         description: Invalid query
+ *       403:
+ *         description: Admin access required
+ */
+router.get('/admin', requireAdmin, adminGetUsers);
+
+/**
+ * @swagger
+ * /api/users/admin/{userId}/status:
+ *   patch:
+ *     summary: Change user status and log it (Admin)
+ *     description: Cannot change own status. Admin targets must be demoted first.
+ *     tags: [Users (Admin)]
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status, reason]
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [active, suspended, banned]
+ *               reason:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Status updated
+ *       400:
+ *         description: Invalid input, own account, or status unchanged
+ *       403:
+ *         description: Target is an admin
+ *       404:
+ *         description: User not found
+ */
+router.patch('/admin/:userId/status', requireAdmin, adminChangeUserStatus);
+
+/**
+ * @swagger
+ * /api/users/admin/{userId}/promote:
+ *   patch:
+ *     summary: Promote an active member to admin (Admin)
+ *     tags: [Users (Admin)]
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: User promoted (promotedBy = current admin)
+ *       400:
+ *         description: Already admin or user is not active
+ *       404:
+ *         description: User not found
+ */
+router.patch('/admin/:userId/promote', requireAdmin, adminPromoteUser);
+
+/**
+ * @swagger
+ * /api/users/admin/{userId}/demote:
+ *   patch:
+ *     summary: Demote an admin to member (Admin)
+ *     description: Cannot demote yourself. Clears promotedBy.
+ *     tags: [Users (Admin)]
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Admin demoted
+ *       400:
+ *         description: Own account or user is not an admin
+ *       404:
+ *         description: User not found
+ */
+router.patch('/admin/:userId/demote', requireAdmin, adminDemoteUser);
 
 /**
  * @swagger
