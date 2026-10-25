@@ -511,3 +511,245 @@ export const getOrderDetails = async (orderId, userId, isAdmin = false) => {
         events
     };
 };
+
+/**
+ * [Admin] List all orders (excluding 'cart') with date range filter + pagination
+ * dateFrom / dateTo are inclusive Thai-time dates (YYYY-MM-DD) matched on confirmedAt
+ */
+export const adminListOrders = async ({ dateFrom, dateTo, page, limit }) => {
+    const query = `
+        SELECT
+            o."orderId",
+            o."orderNo",
+            o."userId",
+            u."email",
+            u."firstName",
+            u."lastName",
+            o."status",
+            o."totalQty",
+            o."totalAmount",
+            o."recipientName",
+            o."recipientPhone",
+            o."confirmedAt",
+            o."paidAt",
+            o."expiresAt",
+            o."cancelledAt",
+            o."cancelReason",
+            s."status" AS "shipmentStatus",
+            s."courier",
+            s."trackingNo",
+            COUNT(*) OVER()::int AS "total"
+        FROM "orders" o
+        JOIN "users" u ON u."userId" = o."userId"
+        LEFT JOIN "shipments" s ON s."orderId" = o."orderId"
+        WHERE o."status" <> 'cart'
+          AND ($1::date IS NULL OR o."confirmedAt" >= ($1::date)::timestamp AT TIME ZONE 'Asia/Bangkok')
+          AND ($2::date IS NULL OR o."confirmedAt" < (($2::date) + 1)::timestamp AT TIME ZONE 'Asia/Bangkok')
+        ORDER BY o."confirmedAt" DESC, o."orderId" DESC
+        LIMIT $3 OFFSET $4;
+    `;
+    const { rows } = await pool.query(query, [dateFrom, dateTo, limit, (page - 1) * limit]);
+    const total = rows[0]?.total ?? 0;
+
+    return {
+        data: rows.map(({ total: _total, ...row }) => row),
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+    };
+};
+
+/**
+ * [Admin] Order detail: customer, items, shipment + timeline, status history
+ */
+export const adminGetOrderDetail = async (orderId) => {
+    const query = `
+        SELECT
+            o.*,
+            json_build_object(
+                'userId', u."userId",
+                'email', u."email",
+                'firstName', u."firstName",
+                'lastName', u."lastName",
+                'phone', u."phone"
+            ) AS "user",
+            (
+                SELECT COALESCE(json_agg(item_obj), '[]'::json)
+                FROM (
+                    SELECT oi."orderItemId", oi."productId", oi."productSku", oi."productName",
+                           oi."unitPrice", oi."quantity", oi."subtotal"
+                    FROM "orderItems" oi
+                    WHERE oi."orderId" = o."orderId"
+                    ORDER BY oi."orderItemId" ASC
+                ) AS item_obj
+            ) AS "items",
+            (
+                SELECT row_to_json(shipment_obj)
+                FROM (
+                    SELECT s."shipmentId", s."status", s."courier", s."trackingNo",
+                           s."shippedAt", s."deliveredAt",
+                           (
+                               SELECT COALESCE(json_agg(event_obj), '[]'::json)
+                               FROM (
+                                   SELECT se."eventId", se."status", se."note", se."changedBy", se."createdAt"
+                                   FROM "shipmentEvents" se
+                                   WHERE se."shipmentId" = s."shipmentId"
+                                   ORDER BY se."createdAt" ASC, se."eventId" ASC
+                               ) AS event_obj
+                           ) AS "events"
+                    FROM "shipments" s
+                    WHERE s."orderId" = o."orderId"
+                ) AS shipment_obj
+            ) AS "shipment",
+            (
+                SELECT COALESCE(json_agg(log_obj), '[]'::json)
+                FROM (
+                    SELECT l."logId", l."oldStatus", l."newStatus", l."changedBy", l."changedAt"
+                    FROM "orderStatusLogs" l
+                    WHERE l."orderId" = o."orderId"
+                    ORDER BY l."changedAt" ASC, l."logId" ASC
+                ) AS log_obj
+            ) AS "statusLogs"
+        FROM "orders" o
+        JOIN "users" u ON u."userId" = o."userId"
+        WHERE o."orderId" = $1 AND o."status" <> 'cart';
+    `;
+    const { rows } = await pool.query(query, [orderId]);
+    return rows[0] || null;
+};
+
+// null = ยังไม่มีแถว shipments, ลำดับเลื่อนทีละขั้น
+const SHIPMENT_STEPS = [null, 'preparing', 'shipped', 'in_transit', 'out_for_delivery', 'delivered'];
+
+const SHIPMENT_NOTES = {
+    preparing: 'ร้านกำลังจัดเตรียมพัสดุ',
+    shipped: 'ส่งมอบพัสดุให้ขนส่งแล้ว',
+    in_transit: 'พัสดุอยู่ระหว่างขนส่ง',
+    out_for_delivery: 'พัสดุกำลังนำจ่าย',
+    delivered: 'จัดส่งสำเร็จ'
+};
+
+/**
+ * [Admin] Advance shipment exactly one step (atomic)
+ * paid -> (create shipment) preparing -> shipped -> in_transit -> out_for_delivery -> delivered
+ * shipped => order 'shipped' (requires courier + trackingNo), delivered => order 'completed'
+ */
+export const advanceShipment = async (orderId, adminId, { status, courier, trackingNo, note }) => {
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        const orderRes = await client.query('SELECT * FROM "orders" WHERE "orderId" = $1 FOR UPDATE;', [orderId]);
+        const order = orderRes.rows[0];
+
+        if (!order || order.status === 'cart') {
+            throw { status: 404, message: 'Order not found' };
+        }
+
+        if (!['paid', 'shipped'].includes(order.status)) {
+            throw {
+                status: 400,
+                message: `Shipment can only be advanced on paid/shipped orders. Current status: ${order.status}`
+            };
+        }
+
+        const shipRes = await client.query('SELECT * FROM "shipments" WHERE "orderId" = $1 FOR UPDATE;', [orderId]);
+        let shipment = shipRes.rows[0];
+
+        const currentIdx = SHIPMENT_STEPS.indexOf(shipment ? shipment.status : null);
+        const nextStatus = SHIPMENT_STEPS[currentIdx + 1];
+
+        if (!nextStatus) {
+            throw { status: 400, message: 'Shipment already delivered' };
+        }
+
+        if (status && status !== nextStatus) {
+            throw {
+                status: 400,
+                message: `Shipment must advance one step at a time. Next status: "${nextStatus}"`
+            };
+        }
+
+        const newCourier = courier?.trim() || shipment?.courier || null;
+        const newTrackingNo = trackingNo?.trim() || shipment?.trackingNo || null;
+
+        if (nextStatus === 'shipped' && (!newCourier || !newTrackingNo)) {
+            throw { status: 400, message: 'Courier and trackingNo are required to mark as shipped' };
+        }
+
+        if (!shipment) {
+            const created = await client.query(
+                `
+                INSERT INTO "shipments" ("orderId", "status", "courier", "trackingNo")
+                VALUES ($1, 'preparing', $2, $3)
+                RETURNING *;
+                `,
+                [orderId, newCourier, newTrackingNo]
+            );
+            shipment = created.rows[0];
+        } else {
+            const updated = await client.query(
+                `
+                UPDATE "shipments"
+                SET "status" = $1,
+                    "courier" = $2,
+                    "trackingNo" = $3,
+                    "shippedAt" = CASE WHEN $1 = 'shipped' THEN NOW() ELSE "shippedAt" END,
+                    "deliveredAt" = CASE WHEN $1 = 'delivered' THEN NOW() ELSE "deliveredAt" END,
+                    "updatedAt" = NOW()
+                WHERE "shipmentId" = $4
+                RETURNING *;
+                `,
+                [nextStatus, newCourier, newTrackingNo, shipment.shipmentId]
+            );
+            shipment = updated.rows[0];
+        }
+
+        await client.query(
+            `
+            INSERT INTO "shipmentEvents" ("shipmentId", "status", "note", "changedBy", "createdAt")
+            VALUES ($1, $2, $3, $4, NOW());
+            `,
+            [shipment.shipmentId, nextStatus, note?.trim() || SHIPMENT_NOTES[nextStatus], adminId]
+        );
+
+        // shipped -> order shipped, delivered -> order completed
+        const orderStatusByShipment = { shipped: 'shipped', delivered: 'completed' };
+        const newOrderStatus = orderStatusByShipment[nextStatus];
+        let updatedOrder = order;
+
+        if (newOrderStatus) {
+            // status <> $1 กันซ้ำ หาก DB trigger เปลี่ยนสถานะบิลให้แล้ว
+            const orderUpdate = await client.query(
+                `
+                UPDATE "orders"
+                SET "status" = $1, "updatedAt" = NOW()
+                WHERE "orderId" = $2 AND "status" <> $1
+                RETURNING *;
+                `,
+                [newOrderStatus, orderId]
+            );
+
+            if (orderUpdate.rows[0]) {
+                updatedOrder = orderUpdate.rows[0];
+                await client.query(
+                    `
+                    INSERT INTO "orderStatusLogs" ("orderId", "oldStatus", "newStatus", "changedBy", "changedAt")
+                    VALUES ($1, $2, $3, $4, NOW());
+                    `,
+                    [orderId, order.status, newOrderStatus, adminId]
+                );
+            } else {
+                const refreshed = await client.query('SELECT * FROM "orders" WHERE "orderId" = $1;', [orderId]);
+                updatedOrder = refreshed.rows[0];
+            }
+        }
+
+        await client.query('COMMIT');
+        return { order: updatedOrder, shipment };
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+};
