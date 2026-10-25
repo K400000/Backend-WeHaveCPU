@@ -558,3 +558,178 @@ export async function deleteProductImage(req, res) {
         return res.status(500).json({ message: err.message });
     }
 }
+
+// ==========================================
+// 7. รายการสินค้า Public (Public List Products)
+// ==========================================
+export async function getProducts(req, res) {
+    try {
+        const {
+            search = '',
+            categoryId,
+            brandId,
+            minPrice,
+            maxPrice,
+            inStock,
+            page = 1,
+            limit = 20,
+            sortBy = 'createdAt',
+            sortOrder = 'DESC'
+        } = req.query;
+
+        const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(limit, 10);
+        const queryParams = [];
+        let whereClauses = ['p."deletedAt" IS NULL', 'p."isActive" = true'];
+
+        // ค้นหาตามชื่อสินค้า หรือ SKU
+        if (search.trim()) {
+            queryParams.push(`%${search.trim().toLowerCase()}%`);
+            whereClauses.push(`(LOWER(p."name") LIKE $${queryParams.length} OR LOWER(p."sku") LIKE $${queryParams.length})`);
+        }
+
+        // กรองตามหมวดหมู่
+        if (categoryId) {
+            queryParams.push(parseInt(categoryId, 10));
+            whereClauses.push(`p."categoryId" = $${queryParams.length}`);
+        }
+
+        // กรองตามแบรนด์
+        if (brandId) {
+            queryParams.push(parseInt(brandId, 10));
+            whereClauses.push(`p."brandId" = $${queryParams.length}`);
+        }
+
+        // กรองตามช่วงราคา
+        if (minPrice !== undefined && minPrice !== '') {
+            queryParams.push(parseFloat(minPrice));
+            whereClauses.push(`p."price" >= $${queryParams.length}`);
+        }
+        if (maxPrice !== undefined && maxPrice !== '') {
+            queryParams.push(parseFloat(maxPrice));
+            whereClauses.push(`p."price" <= $${queryParams.length}`);
+        }
+
+        // กรองตามสต็อก
+        if (inStock === 'true') {
+            whereClauses.push(`p."stock" > 0`);
+        }
+
+        const whereSQL = `WHERE ${whereClauses.join(' AND ')}`;
+
+        // นับจำนวนทั้งหมดสำหรับ Pagination
+        const countQry = `SELECT COUNT(*)::int AS "total" FROM "products" p ${whereSQL};`;
+        const countRes = await database.query(countQry, queryParams);
+        const totalItems = countRes.rows[0]?.total || 0;
+
+        // คำนวณ Sorting ที่ปลอดภัย
+        const validSortCols = {
+            productId: 'p."productId"',
+            name: 'p."name"',
+            price: 'p."price"',
+            stock: 'p."stock"',
+            createdAt: 'p."createdAt"'
+        };
+        const sortColumn = validSortCols[sortBy] || 'p."createdAt"';
+        const sortDirection = String(sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+        queryParams.push(parseInt(limit, 10));
+        const limitParam = `$${queryParams.length}`;
+        queryParams.push(offset);
+        const offsetParam = `$${queryParams.length}`;
+
+        const strQry = `
+            SELECT
+                p."productId",
+                p."sku",
+                p."name",
+                p."description",
+                p."price",
+                p."stock",
+                p."categoryId",
+                c."name" AS "categoryName",
+                p."brandId",
+                b."name" AS "brandName",
+                b."logoUrl" AS "brandLogoUrl",
+                p."specs",
+                p."createdAt",
+                (
+                    SELECT "imageUrl"
+                    FROM "productImages"
+                    WHERE "productId" = p."productId" AND "isPrimary" = true
+                    LIMIT 1
+                ) AS "primaryImage"
+            FROM "products" p
+            LEFT JOIN "categories" c ON p."categoryId" = c."categoryId"
+            LEFT JOIN "brands" b ON p."brandId" = b."brandId"
+            ${whereSQL}
+            ORDER BY ${sortColumn} ${sortDirection}
+            LIMIT ${limitParam} OFFSET ${offsetParam};
+        `;
+
+        const result = await database.query(strQry, queryParams);
+
+        return res.status(200).json({
+            pagination: {
+                totalItems,
+                totalPages: Math.ceil(totalItems / parseInt(limit, 10)),
+                currentPage: parseInt(page, 10),
+                limit: parseInt(limit, 10)
+            },
+            data: result.rows
+        });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+}
+
+// ==========================================
+// 8. รายละเอียดสินค้า Public (Public Product Detail)
+// ==========================================
+export async function getProductById(req, res) {
+    try {
+        const { productId } = req.params;
+
+        const strQry = `
+            SELECT
+                p."productId",
+                p."sku",
+                p."name",
+                p."description",
+                p."price",
+                p."stock",
+                p."categoryId",
+                c."name" AS "categoryName",
+                c."slug" AS "categorySlug",
+                p."brandId",
+                b."name" AS "brandName",
+                b."logoUrl" AS "brandLogoUrl",
+                p."specs",
+                p."createdAt",
+                p."updatedAt"
+            FROM "products" p
+            LEFT JOIN "categories" c ON p."categoryId" = c."categoryId"
+            LEFT JOIN "brands" b ON p."brandId" = b."brandId"
+            WHERE p."productId" = $1 AND p."deletedAt" IS NULL AND p."isActive" = true;
+        `;
+        const result = await database.query(strQry, [productId]);
+        const product = result.rows[0];
+
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found' });
+        }
+
+        // ดึงรูปภาพทั้งหมดของสินค้านี้
+        const imagesQry = `
+            SELECT "imageId", "imageUrl", "isPrimary", "sortOrder"
+            FROM "productImages"
+            WHERE "productId" = $1
+            ORDER BY "isPrimary" DESC, "sortOrder" ASC, "imageId" ASC;
+        `;
+        const imagesRes = await database.query(imagesQry, [productId]);
+        product.images = imagesRes.rows;
+
+        return res.status(200).json(product);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+}

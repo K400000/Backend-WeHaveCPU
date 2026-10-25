@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import {
+    getProducts,
+    getProductById,
     getAdminProducts,
     getAdminProductById,
     createProduct,
@@ -15,6 +17,95 @@ import { requireAdmin } from '../middlewares/roleMiddleware.js';
 import { uploadProductImage } from '../middlewares/uploadMiddleware.js';
 
 const router = Router();
+
+// ==========================================
+// Public Product Endpoints (ไม่ต้อง Login)
+// ==========================================
+
+/**
+ * @swagger
+ * /api/products:
+ *   get:
+ *     summary: Get products list with search, filters and pagination (Public)
+ *     tags: [Products]
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search by product name or SKU
+ *       - in: query
+ *         name: categoryId
+ *         schema:
+ *           type: integer
+ *         description: Filter by category ID
+ *       - in: query
+ *         name: brandId
+ *         schema:
+ *           type: integer
+ *         description: Filter by brand ID
+ *       - in: query
+ *         name: minPrice
+ *         schema:
+ *           type: number
+ *         description: Minimum price filter
+ *       - in: query
+ *         name: maxPrice
+ *         schema:
+ *           type: number
+ *         description: Maximum price filter
+ *       - in: query
+ *         name: inStock
+ *         schema:
+ *           type: boolean
+ *         description: Filter only in-stock products
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum: [productId, name, price, stock, createdAt]
+ *           default: createdAt
+ *       - in: query
+ *         name: sortOrder
+ *         schema:
+ *           type: string
+ *           enum: [ASC, DESC]
+ *           default: DESC
+ *     responses:
+ *       200:
+ *         description: Products list with pagination
+ */
+router.get('/', getProducts);
+
+/**
+ * @swagger
+ * /api/products/{productId}:
+ *   get:
+ *     summary: Get product detail by ID (Public)
+ *     tags: [Products]
+ *     parameters:
+ *       - in: path
+ *         name: productId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Product detail with all images
+ *       404:
+ *         description: Product not found or not available
+ */
+router.get('/:productId', getProductById);
 
 // ==========================================
 // Admin Product Endpoints (ต้องผ่าน authenticate และ requireAdmin)
