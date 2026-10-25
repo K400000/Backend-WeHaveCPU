@@ -61,3 +61,25 @@ export const uploadProfileImage = multer({
     limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
     fileFilter: imageFilter
 });
+
+// กำหนดโฟลเดอร์สำหรับเก็บโลโก้แบรนด์
+const brandStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dest = path.join(__dirname, '../public/uploads/brands');
+        if (!fs.existsSync(dest)) {
+            fs.mkdirSync(dest, { recursive: true });
+        }
+        cb(null, dest);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        const ext = path.extname(file.originalname).toLowerCase();
+        cb(null, `brand-${uniqueSuffix}${ext}`);
+    }
+});
+
+export const uploadBrandLogo = multer({
+    storage: brandStorage,
+    limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
+    fileFilter: imageFilter
+});
