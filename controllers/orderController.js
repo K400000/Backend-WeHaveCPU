@@ -1,9 +1,282 @@
+import database from '../config/db.js';
 import * as orderService from '../services/orderService.js';
+
+/**
+ * 1. ประวัติคำสั่งซื้อทั้งหมดของผู้ใช้ (ไม่รวมสถานะ 'cart')
+ */
+export async function getMyOrders(req, res) {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const strQry = `
+            SELECT 
+                o."orderId",
+                o."orderNo",
+                o."status",
+                o."totalQty",
+                o."totalAmount",
+                o."recipientName",
+                o."recipientPhone",
+                o."shippingAddress",
+                o."confirmedAt",
+                o."paidAt",
+                o."expiresAt",
+                o."cancelledAt",
+                o."cancelReason",
+                o."createdAt",
+                s."status" AS "shipmentStatus",
+                s."courier",
+                s."trackingNo",
+                (
+                    SELECT COALESCE(json_agg(item_obj), '[]'::json)
+                    FROM (
+                        SELECT 
+                            oi."orderItemId",
+                            oi."productId",
+                            oi."productSku",
+                            oi."productName",
+                            oi."unitPrice",
+                            oi."quantity",
+                            oi."subtotal",
+                            (
+                                SELECT "imageUrl"
+                                FROM "productImages"
+                                WHERE "productId" = oi."productId" AND "isPrimary" = true
+                                LIMIT 1
+                            ) AS "imageUrl"
+                        FROM "orderItems" oi
+                        WHERE oi."orderId" = o."orderId"
+                    ) AS item_obj
+                ) AS "items"
+            FROM "orders" o
+            LEFT JOIN "shipments" s ON o."orderId" = s."orderId"
+            WHERE o."userId" = $1 AND o."status" != 'cart'
+            ORDER BY o."createdAt" DESC;
+        `;
+
+        const result = await database.query(strQry, [userId]);
+        return res.status(200).json(result.rows);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+}
+
+/**
+ * 2. รายละเอียดคำสั่งซื้อ + รายการสินค้า + ข้อมูลพัสดุ + ไทม์ไลน์พัสดุ
+ */
+export async function getOrderById(req, res) {
+    try {
+        const userId = req.user?.userId;
+        const { orderId } = req.params;
+        const isAdmin = req.user?.role === 'admin';
+
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        if (!orderId) {
+            return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        const strQry = `
+            SELECT 
+                o."orderId",
+                o."orderNo",
+                o."userId",
+                o."status",
+                o."totalQty",
+                o."totalAmount",
+                o."recipientName",
+                o."recipientPhone",
+                o."shippingAddress",
+                o."note",
+                o."confirmedAt",
+                o."paidAt",
+                o."expiresAt",
+                o."cancelledAt",
+                o."cancelReason",
+                o."createdAt",
+                o."updatedAt",
+
+                -- รายการสินค้าในบิลพร้อมรูปหลัก
+                (
+                    SELECT COALESCE(json_agg(item_obj), '[]'::json)
+                    FROM (
+                        SELECT 
+                            oi."orderItemId",
+                            oi."productId",
+                            oi."productSku",
+                            oi."productName",
+                            oi."unitPrice",
+                            oi."quantity",
+                            oi."subtotal",
+                            (
+                                SELECT "imageUrl"
+                                FROM "productImages"
+                                WHERE "productId" = oi."productId" AND "isPrimary" = true
+                                LIMIT 1
+                            ) AS "imageUrl"
+                        FROM "orderItems" oi
+                        WHERE oi."orderId" = o."orderId"
+                        ORDER BY oi."orderItemId" ASC
+                    ) AS item_obj
+                ) AS "items",
+
+                -- ข้อมูลพัสดุและไทม์ไลน์ติดตามพัสดุ
+                (
+                    SELECT row_to_json(shipment_obj)
+                    FROM (
+                        SELECT 
+                            s."shipmentId",
+                            s."status",
+                            s."courier",
+                            s."trackingNo",
+                            s."shippedAt",
+                            s."deliveredAt",
+                            (
+                                SELECT COALESCE(json_agg(event_obj), '[]'::json)
+                                FROM (
+                                    SELECT 
+                                        se."eventId",
+                                        se."status",
+                                        se."note",
+                                        se."createdAt"
+                                    FROM "shipmentEvents" se
+                                    WHERE se."shipmentId" = s."shipmentId"
+                                    ORDER BY se."createdAt" ASC
+                                ) AS event_obj
+                            ) AS "events"
+                        FROM "shipments" s
+                        WHERE s."orderId" = o."orderId"
+                    ) AS shipment_obj
+                ) AS "shipment"
+
+            FROM "orders" o
+            WHERE o."orderId" = $1 ${!isAdmin ? 'AND o."userId" = $2' : ''}
+            LIMIT 1;
+        `;
+
+        const queryParams = isAdmin ? [orderId] : [orderId, userId];
+        const result = await database.query(strQry, queryParams);
+        const order = result.rows[0];
+
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        return res.status(200).json(order);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+}
+
+/**
+ * 3. ติดตามสถานะและไทม์ไลน์พัสดุ (Tracking & Events Timeline)
+ */
+export async function getOrderTracking(req, res) {
+    try {
+        const userId = req.user?.userId;
+        const { orderId } = req.params;
+        const isAdmin = req.user?.role === 'admin';
+
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        if (!orderId) {
+            return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        // ตรวจสอบสิทธิ์ว่ามีบิลนี้และเป็นเจ้าของจริง (หรือเป็น Admin)
+        const checkQry = `
+            SELECT "orderId", "orderNo", "status"
+            FROM "orders"
+            WHERE "orderId" = $1 ${!isAdmin ? 'AND "userId" = $2' : ''}
+            LIMIT 1;
+        `;
+        const checkParams = isAdmin ? [orderId] : [orderId, userId];
+        const checkRes = await database.query(checkQry, checkParams);
+
+        if (checkRes.rows.length === 0) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        const order = checkRes.rows[0];
+
+        // ดึงข้อมูลการจัดส่งและไทม์ไลน์เหตุการณ์ (timeline และ events)
+        const strQry = `
+            SELECT 
+                s."shipmentId",
+                s."orderId",
+                o."orderNo",
+                s."status" AS "shipmentStatus",
+                o."status" AS "orderStatus",
+                s."courier",
+                s."trackingNo",
+                s."shippedAt",
+                s."deliveredAt",
+                (
+                    SELECT COALESCE(json_agg(event_obj), '[]'::json)
+                    FROM (
+                        SELECT 
+                            se."eventId",
+                            se."status",
+                            se."note",
+                            se."createdAt"
+                        FROM "shipmentEvents" se
+                        WHERE se."shipmentId" = s."shipmentId"
+                        ORDER BY se."createdAt" ASC
+                    ) AS event_obj
+                ) AS "timeline",
+                (
+                    SELECT COALESCE(json_agg(event_obj), '[]'::json)
+                    FROM (
+                        SELECT 
+                            se."eventId",
+                            se."status",
+                            se."note",
+                            se."createdAt"
+                        FROM "shipmentEvents" se
+                        WHERE se."shipmentId" = s."shipmentId"
+                        ORDER BY se."createdAt" ASC
+                    ) AS event_obj
+                ) AS "events"
+            FROM "shipments" s
+            JOIN "orders" o ON s."orderId" = o."orderId"
+            WHERE s."orderId" = $1
+            LIMIT 1;
+        `;
+
+        const result = await database.query(strQry, [orderId]);
+        const tracking = result.rows[0];
+
+        if (!tracking) {
+            return res.status(200).json({
+                orderId: order.orderId,
+                orderNo: order.orderNo,
+                orderStatus: order.status,
+                shipmentStatus: 'preparing',
+                courier: null,
+                trackingNo: null,
+                timeline: [],
+                events: []
+            });
+        }
+
+        return res.status(200).json(tracking);
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+}
+
 
 /**
  * Handle checkout: convert cart to pending order, deduct stock, generate orderNo
  */
-export const checkoutOrder = async (req, res) => {
+export async function checkoutOrder(req, res) {
     try {
         const userId = req.user?.userId;
         const { recipientName, recipientPhone, shippingAddress, note } = req.body;
@@ -29,12 +302,12 @@ export const checkoutOrder = async (req, res) => {
     } catch (err) {
         return res.status(err.status || 500).json({ message: err.message });
     }
-};
+}
 
 /**
  * Handle mock payment: advance order from pending to paid
  */
-export const payMockOrder = async (req, res) => {
+export async function payMockOrder(req, res) {
     try {
         const userId = req.user?.userId;
         const { orderId } = req.params;
@@ -52,12 +325,12 @@ export const payMockOrder = async (req, res) => {
     } catch (err) {
         return res.status(err.status || 500).json({ message: err.message });
     }
-};
+}
 
 /**
  * Cancel unpaid pending order (User or Admin)
  */
-export const cancelMyOrder = async (req, res) => {
+export async function cancelMyOrder(req, res) {
     try {
         const userId = req.user?.userId;
         const { orderId } = req.params;
@@ -82,12 +355,12 @@ export const cancelMyOrder = async (req, res) => {
     } catch (err) {
         return res.status(err.status || 500).json({ message: err.message });
     }
-};
+}
 
 /**
  * Update order status (Admin)
  */
-export const updateStatus = async (req, res) => {
+export async function updateStatus(req, res) {
     try {
         const { orderId } = req.params;
         const { status, note } = req.body;
@@ -115,47 +388,4 @@ export const updateStatus = async (req, res) => {
     } catch (err) {
         return res.status(err.status || 500).json({ message: err.message });
     }
-};
-
-/**
- * Get user order history
- */
-export const getMyOrders = async (req, res) => {
-    try {
-        const userId = req.user?.userId;
-        const orders = await orderService.getUserOrders(userId);
-
-        return res.status(200).json({
-            orders
-        });
-    } catch (err) {
-        return res.status(err.status || 500).json({ message: err.message });
-    }
-};
-
-/**
- * Get specific order details with items and timeline
- */
-export const getOrderById = async (req, res) => {
-    try {
-        const userId = req.user?.userId;
-        const { orderId } = req.params;
-        const isAdmin = req.user?.role === 'admin';
-
-        if (!orderId) {
-            return res.status(400).json({ message: 'Valid orderId is required' });
-        }
-
-        const order = await orderService.getOrderDetails(
-            parseInt(orderId, 10),
-            userId,
-            isAdmin
-        );
-
-        return res.status(200).json({
-            order
-        });
-    } catch (err) {
-        return res.status(err.status || 500).json({ message: err.message });
-    }
-};
+}

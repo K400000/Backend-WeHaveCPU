@@ -5,7 +5,8 @@ import {
     cancelMyOrder,
     updateStatus,
     getMyOrders,
-    getOrderById
+    getOrderById,
+    getOrderTracking
 } from '../controllers/orderController.js';
 import { authenticate } from '../middlewares/authMiddleware.js';
 
@@ -166,5 +167,26 @@ router.get('/', getMyOrders);
  *         description: Order not found
  */
 router.get('/:orderId', getOrderById);
+
+/**
+ * @swagger
+ * /api/orders/{orderId}/tracking:
+ *   get:
+ *     summary: Get shipment tracking information and events timeline
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Tracking details with events timeline
+ *       404:
+ *         description: Order not found
+ */
+router.get('/:orderId/tracking', getOrderTracking);
+router.get('/:orderId/timeline', getOrderTracking);
 
 export default router;
