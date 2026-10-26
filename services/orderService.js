@@ -255,7 +255,7 @@ export const payOrder = async (orderId, userId) => {
  * Cancel unpaid pending order and refund stock atomically
  * Invokes cancel_order() stored function or pure transaction fallback
  */
-export const cancelOrder = async (orderId, userId, reason = 'Customer cancelled', isAdmin = false) => {
+export const cancelOrder = async (orderId, userId, reason = 'customer', isAdmin = false) => {
     const client = await pool.connect();
 
     try {

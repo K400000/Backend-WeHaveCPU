@@ -217,14 +217,6 @@ router.post('/:orderId/pay', payMockOrder);
  *         required: true
  *         schema:
  *           type: integer
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               reason:
- *                 type: string
  *     responses:
  *       200:
  *         description: Order cancelled and stock restored

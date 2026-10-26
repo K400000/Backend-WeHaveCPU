@@ -334,7 +334,6 @@ export async function cancelMyOrder(req, res) {
     try {
         const userId = req.user?.userId;
         const { orderId } = req.params;
-        const { reason } = req.body;
         const isAdmin = req.user?.role === 'admin';
 
         if (!orderId) {
@@ -344,7 +343,7 @@ export async function cancelMyOrder(req, res) {
         const cancelledOrder = await orderService.cancelOrder(
             parseInt(orderId, 10),
             userId,
-            reason || (isAdmin ? 'admin' : 'Customer cancelled'),
+            isAdmin ? 'admin' : 'customer',
             isAdmin
         );
 
