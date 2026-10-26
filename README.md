@@ -49,4 +49,4 @@ Routes (End-points) -> Middlewares (Auth/Validation) -> Controllers (Req/Res) ->
 | 1 | นาย สุพศิน คำพะแย | [@K400000](https://github.com/K400000) |
 | 2 | นาย มาวิน บุญศรี | [@Mawinbosri](https://github.com/Mawinbosri) |
 | 3 | นาย ปิยกร คชานนท์ | [@Shiseko](https://github.com/Shiseko) |
-| 4 | นาย รัชชานนท์ ถนอมสิงห์ | [@mmrnt]([https://github.com/](https://github.com/mmrnt)) |
+| 4 | นาย รัชชานนท์ ถนอมสิงห์ | [@mmrnt](https://github.com/mmrnt) |
