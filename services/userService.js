@@ -63,8 +63,8 @@ export const adminListUsers = async ({ status, role, search, page, limit }) => {
                "role", "status", "promotedBy", "lastLoginAt", "createdAt",
                COUNT(*) OVER()::int AS "total"
         FROM "users"
-        WHERE ($1::text IS NULL OR "status" = $1)
-          AND ($2::text IS NULL OR "role" = $2)
+        WHERE ($1::text IS NULL OR "status"::text = $1)
+          AND ($2::text IS NULL OR "role"::text = $2)
           AND ($3::text IS NULL
                OR "email" ILIKE $3
                OR ("firstName" || ' ' || "lastName") ILIKE $3)
@@ -185,12 +185,12 @@ export const adminChangeUserRole = async (targetId, adminId, newRole) => {
             `
             UPDATE "users"
             SET "role" = $1,
-                "promotedBy" = CASE WHEN $1 = 'admin' THEN $2::int ELSE NULL END,
+                "promotedBy" = $2::int,
                 "updatedAt" = NOW()
             WHERE "userId" = $3
             RETURNING "userId", "email", "firstName", "lastName", "role", "status", "promotedBy", "updatedAt";
             `,
-            [newRole, adminId, targetId]
+            [newRole, newRole === 'admin' ? adminId : null, targetId]
         );
 
         await client.query('COMMIT');
@@ -241,12 +241,12 @@ export const adminSetRoleByEmail = async (email, adminId, newRole) => {
             `
             UPDATE "users"
             SET "role" = $1,
-                "promotedBy" = CASE WHEN $1 = 'admin' THEN $2::int ELSE NULL END,
+                "promotedBy" = $2::int,
                 "updatedAt" = NOW()
             WHERE "userId" = $3
             RETURNING "userId", "email", "firstName", "lastName", "role", "status", "promotedBy", "updatedAt";
             `,
-            [newRole, adminId, target.userId]
+            [newRole, newRole === 'admin' ? adminId : null, target.userId]
         );
 
         await client.query('COMMIT');
