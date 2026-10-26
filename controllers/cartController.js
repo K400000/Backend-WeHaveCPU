@@ -141,7 +141,7 @@ export async function addToCart(req, res) {
 
             const updateItemQry = `
                 UPDATE "orderItems"
-                SET "quantity" = $1, "subtotal" = $1 * "unitPrice"
+                SET "quantity" = $1
                 WHERE "orderItemId" = $2;
             `;
             await client.query(updateItemQry, [newQty, existingItem.orderItemId]);
