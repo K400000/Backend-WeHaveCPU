@@ -162,6 +162,7 @@ export const checkout = async (userId, shippingData) => {
  * Changes status to paid, logs status, creates shipment record
  */
 export const payOrder = async (orderId, userId) => {
+    await expirePendingOrders();
     const client = await pool.connect();
 
     try {
@@ -414,9 +415,77 @@ export const updateOrderStatus = async (orderId, newStatus, changedBy, note = nu
 };
 
 /**
+ * Expire pending orders that passed expiresAt: cancel, refund stock, set cancelReason 'payment_timeout'
+ */
+export const expirePendingOrders = async () => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const expiredRes = await client.query(
+            `
+            SELECT "orderId", "userId"
+            FROM "orders"
+            WHERE "status" = 'pending'
+              AND "expiresAt" IS NOT NULL
+              AND "expiresAt" < NOW()
+            FOR UPDATE SKIP LOCKED;
+            `
+        );
+
+        let expiredCount = 0;
+        for (const order of expiredRes.rows) {
+            // refund stock
+            await client.query(
+                `
+                UPDATE "products" p
+                SET "stock" = p."stock" + oi."quantity",
+                    "updatedAt" = NOW()
+                FROM "orderItems" oi
+                WHERE oi."orderId" = $1 AND p."productId" = oi."productId";
+                `,
+                [order.orderId]
+            );
+
+            // cancel order
+            await client.query(
+                `
+                UPDATE "orders"
+                SET "status" = 'cancelled',
+                    "cancelledAt" = NOW(),
+                    "cancelReason" = 'payment_timeout',
+                    "updatedAt" = NOW()
+                WHERE "orderId" = $1;
+                `,
+                [order.orderId]
+            );
+
+            // log
+            await client.query(
+                `
+                INSERT INTO "orderStatusLogs" ("orderId", "oldStatus", "newStatus", "changedBy", "changedAt")
+                VALUES ($1, 'pending', 'cancelled', $2, NOW());
+                `,
+                [order.orderId, order.userId]
+            );
+            expiredCount++;
+        }
+
+        await client.query('COMMIT');
+        return { expiredCount };
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+};
+
+/**
  * Get orders list for a user (excluding 'cart')
  */
 export const getUserOrders = async (userId) => {
+    await expirePendingOrders();
     const query = `
         SELECT 
             o."orderId",
@@ -449,6 +518,7 @@ export const getUserOrders = async (userId) => {
  * Get detailed order information including items and tracking timeline
  */
 export const getOrderDetails = async (orderId, userId, isAdmin = false) => {
+    await expirePendingOrders();
     const orderQry = `
         SELECT 
             o.*,
@@ -517,6 +587,7 @@ export const getOrderDetails = async (orderId, userId, isAdmin = false) => {
  * dateFrom / dateTo are inclusive Thai-time dates (YYYY-MM-DD) matched on confirmedAt
  */
 export const adminListOrders = async ({ dateFrom, dateTo, page, limit }) => {
+    await expirePendingOrders();
     const query = `
         SELECT
             o."orderId",
@@ -561,6 +632,7 @@ export const adminListOrders = async ({ dateFrom, dateTo, page, limit }) => {
  * [Admin] Order detail: customer, items, shipment + timeline, status history
  */
 export const adminGetOrderDetail = async (orderId) => {
+    await expirePendingOrders();
     const query = `
         SELECT
             o.*,

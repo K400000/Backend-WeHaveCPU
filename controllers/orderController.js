@@ -11,6 +11,12 @@ export async function getMyOrders(req, res) {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
+        try {
+            await orderService.expirePendingOrders();
+        } catch (e) {
+            // ignore
+        }
+
         const strQry = `
             SELECT 
                 o."orderId",
@@ -79,6 +85,12 @@ export async function getOrderById(req, res) {
 
         if (!orderId) {
             return res.status(400).json({ message: 'Valid orderId is required' });
+        }
+
+        try {
+            await orderService.expirePendingOrders();
+        } catch (e) {
+            // ignore
         }
 
         const strQry = `
