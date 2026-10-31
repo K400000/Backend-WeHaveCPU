@@ -8,7 +8,7 @@ const COOKIE_OPTIONS = {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 60 * 60 * 1000 // 1 hour
+    maxAge: 3600000
 };
 
 export async function register(req, res) {
